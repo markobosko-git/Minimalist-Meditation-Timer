@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Minimalist Stopwatch</title>
+    <style>
+        :root {
+            --text-color: #a37b00; /* Bright yellow */
+            --tap-color: #ffffff; /* White for tap interactions */
+            --touch-color: rgba(255, 255, 255, 0.8); /* 80% white for pinch/move */
+            --bg-color: #000;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Courier New', monospace;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            touch-action: manipulation;
+        }
+        
+        body.full-screen {
+            padding: 0;
+        }
+        
+        #stopwatch-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        #stopwatch-display {
+            font-size: 24vw;
+            text-align: center;
+            user-select: none;
+            cursor: pointer;
+            color: var(--text-color);
+            transition: color 0.3s ease, transform 0.3s ease;
+        }
+        
+        @media (orientation: landscape) {
+            #stopwatch-display { font-size: 30vh; }
+        }
+        
+        @media (orientation: portrait) {
+            #stopwatch-display { font-size: 39.6vw; }
+        }
+    </style>
+</head>
+<body>
+    <div id="stopwatch-container">
+        <div id="stopwatch-display">0</div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const stopwatchDisplay = document.getElementById('stopwatch-display');
+        const container = document.getElementById('stopwatch-container');
+        const body = document.body;
+        
+        // Stopwatch state
+        const state = {
+            running: false,
+            startTime: 0,
+            elapsedTime: 0,
+            timerInterval: null,
+            tapCount: 0,
+            // Touch/zoom state
+            currentScale: 1.0,
+            startDistance: 0,
+            lastPosX: 0,
+            lastPosY: 0,
+            isDragging: false,
+            isInteracting: false,
+            interactionTimeout: null,
+            tapTimeout: null,
+            animationTimeout: null,
+            // Audio context
+            audioContext: null,
+            // Fullscreen state
+            isFullScreen: false,
+            wakeLock: null,
+            wakeLockSupported: 'wakeLock' in navigator,
+            // Font animation
+            baseSize: 0,
+            initialFontSize: ''
+        };
+        
+        // Try to initialize audio context
+        try {
+            state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+            console.error("Web Audio API not supported:", e);
+        }
+        
+        // Min and max zoom limits
+        const ZOOM_LIMITS = {
+            min: 0.3,
+            max: 3.0
+        };
+        
+        // Format time for display (just return the seconds as is)
+        function formatTime(timeInSeconds) {
+            return Math.floor(timeInSeconds);
+        }
+        
+        // Update stopwatch display
+        function updateDisplay() {
+            const currentTime = state.running ? 
+                Math.floor((Date.now() - state.startTime + state.elapsedTime) / 1000) : 
+                Math.floor(state.elapsedTime / 1000);
+            
+            stopwatchDisplay.textContent = formatTime(currentTime);
+            adjustFontSize();
+        }
+        
+        // Adjust font size based on current scale
+        function adjustFontSize() {
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            
+            // Calculate base font size
+            let baseSize;
+            if (window.innerHeight > window.innerWidth) {
+                baseSize = Math.min(containerWidth / 3.3, containerHeight / 3) * 1.8;
+            } else {
+                baseSize = Math.min(containerWidth / 8, containerHeight / 2) * 1.2;
+            }
+            
+            state.baseSize = baseSize;
+            
+            // Apply user's scale
+            stopwatchDisplay.style.fontSize = `${baseSize * state.currentScale}px`;
+            
+            // Store the initial font size for animations
+            state.initialFontSize = stopwatchDisplay.style.fontSize;
+        }
+
+        // Check if fullscreen is supported
+        function isFullscreenSupported() {
+            return document.documentElement.requestFullscreen || 
+                   document.documentElement.mozRequestFullScreen || 
+                   document.documentElement.webkitRequestFullscreen || 
+                   document.documentElement.msRequestFullscreen;
+        }
+        
+        // Enter fullscreen mode
+        function enterFullscreen() {
+            if (!state.isFullScreen) {
+                if (isFullscreenSupported()) {
+                    if (document.documentElement.requestFullscreen) {
+                        document.documentElement.requestFullscreen();
+                    } else if (document.documentElement.mozRequestFullScreen) { /* Firefox */
+                        document.documentElement.mozRequestFullScreen();
+                    } else if (document.documentElement.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
+                        document.documentElement.webkitRequestFullscreen();
+                    } else if (document.documentElement.msRequestFullscreen) { /* IE/Edge */
+                        document.documentElement.msRequestFullscreen();
+                    }
+                    
+                    state.isFullScreen = true;
+                    body.classList.add('full-screen');
+                }
+            }
+        }
+        
+        // Exit fullscreen mode
+        function exitFullscreen() {
+            if (state.isFullScreen) {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.mozCancelFullScreen) { /* Firefox */
+                    document.mozCancelFullScreen();
+                } else if (document.webkitExitFullscreen) { /* Chrome, Safari & Opera */
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) { /* IE/Edge */
+                    document.msExitFullscreen();
+                }
+                
+                state.isFullScreen = false;
+                body.classList.remove('full-screen');
+            }
+        }
+        
+        // Track fullscreen changes
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+        document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+        
+        function handleFullscreenChange() {
+            // Update state to match actual fullscreen status
+            const isFullscreenNow = document.fullscreenElement || 
+                                  document.webkitFullscreenElement || 
+                                  document.mozFullScreenElement || 
+                                  document.msFullscreenElement;
+            
+            state.isFullScreen = !!isFullscreenNow;
+            
+            if (state.isFullScreen) {
+                body.classList.add('full-screen');
+            } else {
+                body.classList.remove('full-screen');
+            }
+        }
+
+        // Request wake lock to keep screen on
+        async function requestWakeLock() {
+            if (!state.wakeLockSupported) return;
+            
+            try {
+                state.wakeLock = await navigator.wakeLock.request('screen');
+                
+                // Reacquire wake lock if released
+                state.wakeLock.addEventListener('release', () => {
+                    if (state.running) {
+                        requestWakeLock();
+                    }
+                });
+            } catch (err) {
+                console.error(`Failed to get wake lock: ${err.name}, ${err.message}`);
+            }
+        }
+        
+        // Release wake lock
+        function releaseWakeLock() {
+            if (state.wakeLock) {
+                state.wakeLock.release()
+                    .then(() => {
+                        state.wakeLock = null;
+                    })
+                    .catch(err => {
+                        console.error(`Failed to release wake lock: ${err.name}, ${err.message}`);
+                    });
+            }
+        }
+        
+        // Play sine wave tones with sequential delay
+        function playTones(frequencies = [256, 512], duration = 200, delay = 333) {
+            if (!state.audioContext) {
+                try {
+                    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                } catch (e) {
+                    console.error("Can't create audio context:", e);
+                    return;
+                }
+            }
+            
+            try {
+                frequencies.forEach((frequency, index) => {
+                    setTimeout(() => {
+                        const oscillator = state.audioContext.createOscillator();
+                        const gainNode = state.audioContext.createGain();
+                        
+                        oscillator.type = 'sine';
+                        oscillator.frequency.value = frequency;
+                        oscillator.connect(gainNode);
+                        gainNode.connect(state.audioContext.destination);
+                        
+                        const now = state.audioContext.currentTime;
+                        gainNode.gain.setValueAtTime(0, now);
+                        gainNode.gain.linearRampToValueAtTime(0.3, now + 0.01); // Lower gain to blend tones
+                        gainNode.gain.setValueAtTime(0.3, now + duration / 1000 - 0.01);
+                        gainNode.gain.linearRampToValueAtTime(0, now + duration / 1000);
+                        
+                        oscillator.start(now);
+                        oscillator.stop(now + duration / 1000);
+                    }, index * delay);
+                });
+            } catch (e) {
+                console.error("Audio playback error:", e);
+            }
+        }
+        
+        // Animate font size - increase by 10% and then return to original
+        function animateFontSize() {
+            // Clear any existing animation timeout
+            if (state.animationTimeout) {
+                clearTimeout(state.animationTimeout);
+            }
+            
+            // Get current scale and font size
+            const currentFontSize = parseFloat(stopwatchDisplay.style.fontSize);
+            const enlargedSize = currentFontSize * 1.1; // Increase by 10%
+            
+            // Set larger size with scale transform
+            stopwatchDisplay.style.transform = 'scale(1.1)';
+            
+            // Set timeout to revert back to original size
+            state.animationTimeout = setTimeout(() => {
+                stopwatchDisplay.style.transform = 'scale(1.0)';
+            }, 300);
+        }
+        
+        // Set tap interaction color (white) and animate
+        function setTapColor() {
+            // Clear any existing timeout
+            if (state.tapTimeout) {
+                clearTimeout(state.tapTimeout);
+            }
+            
+            // Set the color to white for tap interactions
+            stopwatchDisplay.style.color = 'var(--tap-color)';
+            
+            // Animate font size
+            animateFontSize();
+            
+            // Set timeout to revert color after 500ms
+            state.tapTimeout = setTimeout(() => {
+                stopwatchDisplay.style.color = 'var(--text-color)'; // Back to yellow
+            }, 500);
+        }
+        
+        // Start the stopwatch
+        function startStopwatch() {
+            if (!state.running) {
+                // Show white color for tap interaction and animate
+                setTapColor();
+                
+                // Play two sine tones when the stopwatch starts (low to high)
+                playTones([256, 512], 200, 333);
+                
+                // Enter fullscreen mode
+                enterFullscreen();
+                
+                // Request wake lock
+                requestWakeLock();
+                
+                state.startTime = Date.now();
+                state.running = true;
+                state.timerInterval = setInterval(updateDisplay, 1000);
+            }
+        }
+        
+        // Pause the stopwatch
+        function pauseStopwatch() {
+            if (state.running) {
+                // Show white color for tap interaction and animate
+                setTapColor();
+                
+                clearInterval(state.timerInterval);
+                state.elapsedTime += Date.now() - state.startTime;
+                state.running = false;
+                
+                // Exit fullscreen mode
+                exitFullscreen();
+                
+                // Release wake lock
+                releaseWakeLock();
+            }
+        }
+        
+        // Reset the stopwatch
+        function resetStopwatch() {
+            // Show white color for tap interaction and animate
+            setTapColor();
+            
+            // Play tones in order (high to low) for reset
+            playTones([512, 256], 200, 333);
+            
+            clearInterval(state.timerInterval);
+            state.running = false;
+            state.startTime = 0;
+            state.elapsedTime = 0;
+            updateDisplay();
+            
+            // Exit fullscreen if we're in it
+            exitFullscreen();
+            
+            // Release wake lock
+            releaseWakeLock();
+        }
+        
+        // Handle stopwatch taps (start -> pause -> reset)
+        function handleStopwatchTap() {
+            state.tapCount = (state.tapCount + 1) % 3;
+            
+            switch(state.tapCount) {
+                case 0:
+                    resetStopwatch();
+                    break;
+                case 1:
+                    startStopwatch();
+                    break;
+                case 2:
+                    pauseStopwatch();
+                    break;
+            }
+        }
+        
+        // Set touch interaction state (white color for pinch and pan)
+        function setTouchInteractionState(isInteracting) {
+            // Don't interrupt tap color changes
+            if (state.tapTimeout) return;
+            
+            // Clear any existing timeout
+            if (state.interactionTimeout) {
+                clearTimeout(state.interactionTimeout);
+            }
+            
+            // Set the interaction state
+            state.isInteracting = isInteracting;
+            
+            // Change color based on interaction state
+            if (isInteracting) {
+                stopwatchDisplay.style.color = 'var(--touch-color)'; // 80% white during interaction
+                
+                // Set timeout to revert color after 500ms of no interaction
+                state.interactionTimeout = setTimeout(() => {
+                    stopwatchDisplay.style.color = 'var(--text-color)'; // Back to yellow
+                    state.isInteracting = false;
+                }, 500);
+            } else {
+                stopwatchDisplay.style.color = 'var(--text-color)'; // Yellow when not interacting
+            }
+        }
+        
+        // Pinch zoom handlers
+        function handlePinchStart(e) {
+            if (e.touches.length !== 2) return;
+            
+            setTouchInteractionState(true); // Set interaction state to true (white color)
+            
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            state.startDistance = Math.hypot(
+                touch2.clientX - touch1.clientX,
+                touch2.clientY - touch1.clientY
+            );
+        }
+        
+        function handlePinchMove(e) {
+            if (e.touches.length !== 2) return;
+            e.preventDefault();
+            
+            setTouchInteractionState(true); // Keep interaction state true (white color)
+            
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            const currentDistance = Math.hypot(
+                touch2.clientX - touch1.clientX,
+                touch2.clientY - touch1.clientY
+            );
+            
+            if (state.startDistance > 0) {
+                const newScale = state.currentScale * (currentDistance / state.startDistance);
+                state.currentScale = Math.min(Math.max(newScale, ZOOM_LIMITS.min), ZOOM_LIMITS.max);
+                state.startDistance = currentDistance;
+                adjustFontSize();
+            }
+        }
+        
+        // Pan/slide handlers
+        function handlePanStart(e) {
+            if (e.touches && e.touches.length === 1) {
+                setTouchInteractionState(true); // Set interaction state to true (white color)
+                
+                state.isDragging = true;
+                state.lastPosX = e.touches[0].clientX;
+                state.lastPosY = e.touches[0].clientY;
+            }
+        }
+        
+        function handlePanMove(e) {
+            if (!state.isDragging) return;
+            
+            if (e.touches && e.touches.length === 1) {
+                e.preventDefault();
+                
+                setTouchInteractionState(true); // Keep interaction state true (white color)
+                
+                const deltaX = e.touches[0].clientX - state.lastPosX;
+                const deltaY = e.touches[0].clientY - state.lastPosY;
+                
+                // Get current transform
+                const transformValue = window.getComputedStyle(stopwatchDisplay).transform;
+                const matrix = new DOMMatrix(transformValue === 'none' ? 'matrix(1, 0, 0, 1, 0, 0)' : transformValue);
+                
+                // Apply new translation
+                stopwatchDisplay.style.transform = `translate(${matrix.e + deltaX}px, ${matrix.f + deltaY}px)`;
+                
+                // Update last position
+                state.lastPosX = e.touches[0].clientX;
+                state.lastPosY = e.touches[0].clientY;
+            }
+        }
+        
+        function handlePanEnd() {
+            state.isDragging = false;
+            // Let the interaction timeout handle returning to yellow color
+        }
+        
+        // Initialize audio context on user interaction (required by browsers)
+        function initAudio() {
+            if (!state.audioContext) {
+                try {
+                    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    // Create and play a silent buffer to unlock the audio context
+                    const buffer = state.audioContext.createBuffer(1, 1, 22050);
+                    const source = state.audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(state.audioContext.destination);
+                    source.start(0);
+                } catch (e) {
+                    console.error("Failed to initialize audio:", e);
+                }
+            }
+        }
+        
+        // Handle escape key in fullscreen mode
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && state.isFullScreen && state.running) {
+                pauseStopwatch();
+            }
+        });
+        
+        // Event listeners
+        stopwatchDisplay.addEventListener('click', function(e) {
+            initAudio(); // Initialize audio on first interaction
+            handleStopwatchTap();
+        });
+        
+        // Handle touch events for pinch zoom and pan
+        stopwatchDisplay.addEventListener('touchstart', (e) => {
+            initAudio(); // Initialize audio on first interaction
+            
+            if (e.touches.length === 2) {
+                handlePinchStart(e);
+            } else if (e.touches.length === 1) {
+                handlePanStart(e);
+            }
+        }, false);
+        
+        stopwatchDisplay.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                handlePinchMove(e);
+            } else if (e.touches.length === 1) {
+                handlePanMove(e);
+            }
+        }, { passive: false });
+        
+        stopwatchDisplay.addEventListener('touchend', () => {
+            state.startDistance = 0;
+            handlePanEnd();
+        });
+        
+        // Document visibility
+        document.addEventListener('visibilitychange', () => {
+            if (state.wakeLockSupported && document.visibilityState === 'visible' && state.running) {
+                requestWakeLock();
+            }
+        });
+        
+        // Window resize event
+        window.addEventListener('resize', adjustFontSize);
+        window.addEventListener('orientationchange', () => {
+            setTimeout(adjustFontSize, 200);
+        });
+        
+        // Initialize display
+        updateDisplay();
+    </script>
+</body>
+</html>
