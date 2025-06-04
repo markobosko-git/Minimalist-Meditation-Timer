@@ -1,6 +1,7 @@
 # Zen Timer: Minimalist Meditation Timer
 
-<img width="540" alt="PLAKAT" src="https://github.com/user-attachments/assets/d2ebba28-3c74-4e18-bda2-92050986cd28" />
+<img width="257" alt="PLAKAT_514" src="https://github.com/user-attachments/assets/af0d0293-2d76-45ed-8b41-155569faaf7a" />
+
 
 ## Project Overview
 
