@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Minimalist Stopwatch</title>
+    <style>
+        :root {
+            --text-color-yellow: #a37b00; /* Yellow */
+            --text-color-white: #ffffff; /* White */
+            --tap-color: #ffffff; /* White for tap interactions */
+            --touch-color: rgba(255, 255, 255, 0.8); /* 80% white for touch movement */
+            --bg-color: #000;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Courier New', monospace;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            touch-action: manipulation;
+        }
+        
+        body.full-screen {
+            padding: 0;
+        }
+        
+        #stopwatch-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        #stopwatch-display {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            user-select: none;
+            cursor: pointer;
+            transition: color 0.3s ease, transform 0.3s ease;
+        }
+        
+        #stopwatch-display.portrait {
+            flex-direction: column; /* Vertical stacking in portrait mode */
+        }
+        
+        #stopwatch-display.landscape {
+            flex-direction: row; /* Horizontal layout in landscape mode */
+        }
+        
+        /* Digit group styling */
+        .digit-group {
+            display: inline-flex;
+            flex-direction: row;
+        }
+        
+        /* Character-specific styling */
+        .digit {
+            display: inline-block;
+            transition: color 0.3s ease;
+        }
+        
+        .digit.yellow {
+            color: var(--text-color-yellow);
+        }
+        
+        .digit.white {
+            color: var(--text-color-white);
+        }
+    </style>
+</head>
+<body>
+    <div id="stopwatch-container">
+        <div id="stopwatch-display" class="portrait">0</div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const stopwatchDisplay = document.getElementById('stopwatch-display');
+        const container = document.getElementById('stopwatch-container');
+        const body = document.body;
+        
+        // Stopwatch state
+        const state = {
+            running: false,
+            startTime: 0,
+            elapsedTime: 0,
+            timerInterval: null,
+            tapCount: 0,
+            // Touch state
+            startY: 0,
+            lastPosY: 0,
+            isDragging: false,
+            isInteracting: false,
+            interactionTimeout: null,
+            tapTimeout: null,
+            animationTimeout: null,
+            // Audio context
+            audioContext: null,
+            // Fullscreen state
+            isFullScreen: false,
+            wakeLock: null,
+            wakeLockSupported: 'wakeLock' in navigator,
+            // Font animation
+            initialFontSize: '',
+            // Orientation
+            isPortrait: window.innerHeight > window.innerWidth,
+            // Last time display
+            lastTimeString: '0',
+            lastTimeType: 'seconds'
+        };
+        
+        // Try to initialize audio context
+        try {
+            state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+            console.error("Web Audio API not supported:", e);
+        }
+        
+        // Format time for display (with padding zeros)
+        function formatTime(timeInSeconds) {
+            const hours = Math.floor(timeInSeconds / 3600);
+            const minutes = Math.floor((timeInSeconds % 3600) / 60);
+            const seconds = timeInSeconds % 60;
+            
+            // Determine display format based on elapsed time
+            let timeString;
+            let timeType;
+            
+            if (hours > 0) {
+                // Format with padding zeros
+                timeString = `${hours.toString().padStart(2, '0')}${minutes.toString().padStart(2, '0')}${seconds.toString().padStart(2, '0')}`;
+                timeType = 'hours';
+            } else if (minutes > 0) {
+                // Format with padding zeros
+                timeString = `${minutes.toString().padStart(2, '0')}${seconds.toString().padStart(2, '0')}`;
+                timeType = 'minutes';
+            } else {
+                // Just seconds with padding zeros for values under 10
+                timeString = `${seconds.toString().padStart(2, '0')}`;
+                timeType = 'seconds';
+            }
+            
+            return { timeString, timeType };
+        }
+        
+        // Update stopwatch display with colored digits
+        function updateDisplay() {
+            const currentTime = state.running ? 
+                Math.floor((Date.now() - state.startTime + state.elapsedTime) / 1000) : 
+                Math.floor(state.elapsedTime / 1000);
+            
+            const { timeString, timeType } = formatTime(currentTime);
+            
+            // Store current time info
+            const isNewTimeType = timeType !== state.lastTimeType;
+            state.lastTimeString = timeString;
+            state.lastTimeType = timeType;
+            
+            // Check orientation
+            checkOrientation();
+            
+            // Create HTML for display with colored spans
+            let displayHTML = '';
+            
+            if (state.isPortrait) {
+                // Portrait mode - digits stacked vertically
+                if (timeType === 'seconds') {
+                    // Just seconds - all yellow
+                    // Group digits in pairs
+                    for (let i = 0; i < timeString.length; i += 2) {
+                        displayHTML += `<div class="digit-group">`;
+                        displayHTML += `<span class="digit yellow">${timeString[i]}</span>`;
+                        if (i + 1 < timeString.length) {
+                            displayHTML += `<span class="digit yellow">${timeString[i + 1]}</span>`;
+                        }
+                        displayHTML += `</div>`;
+                    }
+                } else if (timeType === 'minutes') {
+                    // Minutes and seconds: minutes white, seconds yellow
+                    const minutesPart = timeString.slice(0, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Group minutes digits in pairs - white
+                    for (let i = 0; i < minutesPart.length; i += 2) {
+                        displayHTML += `<div class="digit-group">`;
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                        if (i + 1 < minutesPart.length) {
+                            displayHTML += `<span class="digit white">${minutesPart[i + 1]}</span>`;
+                        }
+                        displayHTML += `</div>`;
+                    }
+                    
+                    // Group seconds digits in pairs - yellow
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit yellow">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'hours') {
+                    // Hours, minutes and seconds: hours white, minutes yellow, seconds white
+                    const hoursPart = timeString.slice(0, -4);
+                    const minutesPart = timeString.slice(-4, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Group hour digits - white
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < hoursPart.length; i++) {
+                        displayHTML += `<span class="digit white">${hoursPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                    
+                    // Group minute digits - yellow
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit yellow">${minutesPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                    
+                    // Group seconds digits - white
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit white">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                }
+            } else {
+                // Landscape mode - single line display
+                if (timeType === 'seconds') {
+                    // Just seconds - all yellow
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < timeString.length; i++) {
+                        displayHTML += `<span class="digit yellow">${timeString[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'minutes') {
+                    // Minutes white, seconds yellow
+                    const minutesPart = timeString.slice(0, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Minutes part - white
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                    }
+                    
+                    // Seconds part - yellow
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit yellow">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'hours') {
+                    // Hours white, minutes yellow, seconds white
+                    const hoursPart = timeString.slice(0, -4);
+                    const minutesPart = timeString.slice(-4, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Hours part - white
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < hoursPart.length; i++) {
+                        displayHTML += `<span class="digit white">${hoursPart[i]}</span>`;
+                    }
+                    
+                    // Minutes part - yellow
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit yellow">${minutesPart[i]}</span>`;
+                    }
+                    
+                    // Seconds part - white
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit white">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                }
+            }
+            
+            stopwatchDisplay.innerHTML = displayHTML;
+            adjustFontSize();
+        }
+        
+        // Check for orientation changes
+        function checkOrientation() {
+            const wasPortrait = state.isPortrait;
+            state.isPortrait = window.innerHeight > window.innerWidth;
+            
+            if (wasPortrait !== state.isPortrait) {
+                // Update display class
+                if (state.isPortrait) {
+                    stopwatchDisplay.classList.remove('landscape');
+                    stopwatchDisplay.classList.add('portrait');
+                } else {
+                    stopwatchDisplay.classList.remove('portrait');
+                    stopwatchDisplay.classList.add('landscape');
+                }
+                
+                // Wait a bit for the browser to finish resizing
+                setTimeout(adjustFontSize, 300);
+            }
+        }
+        
+        // Adjust font size to fit screen edge to edge
+        function adjustFontSize() {
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            
+            if (state.isPortrait) {
+                // In portrait mode, optimize for stacked digits
+                const digitGroups = document.querySelectorAll('.digit-group');
+                const numGroups = digitGroups.length;
+                
+                if (numGroups > 0) {
+                    // Calculate available height per group
+                    const availableHeight = containerHeight * 0.9; // 90% of container height
+                    const heightPerGroup = availableHeight / numGroups;
+                    
+                    // Find the widest group
+                    let maxWidth = 0;
+                    let maxTextLength = 0;
+                    
+                    digitGroups.forEach(group => {
+                        const textLength = group.textContent.length;
+                        if (textLength > maxTextLength) {
+                            maxTextLength = textLength;
+                            maxWidth = group.textContent.length * 20; // Rough estimate
+                        }
+                    });
+                    
+                    // Create a temporary element to measure
+                    const tempElem = document.createElement('div');
+                    tempElem.style.visibility = 'hidden';
+                    tempElem.style.position = 'absolute';
+                    tempElem.style.whiteSpace = 'nowrap';
+                    tempElem.style.fontFamily = window.getComputedStyle(stopwatchDisplay).fontFamily;
+                    tempElem.textContent = 'X'.repeat(maxTextLength);
+                    document.body.appendChild(tempElem);
+                    
+                    // Calculate optimal font size based on width and height constraints
+                    let fontSize = 100;
+                    tempElem.style.fontSize = `${fontSize}px`;
+                    
+                    // Width constraint
+                    const widthRatio = containerWidth / tempElem.offsetWidth;
+                    // Height constraint (each group should fit in its allocated height)
+                    tempElem.style.fontSize = `${fontSize}px`;
+                    const heightRatio = heightPerGroup / tempElem.offsetHeight;
+                    
+                    // Use the more constraining ratio
+                    const finalRatio = Math.min(widthRatio, heightRatio);
+                    fontSize = Math.floor(fontSize * finalRatio * 0.9); // 90% to add some margin
+                    
+                    // Apply to display
+                    stopwatchDisplay.style.fontSize = `${fontSize}px`;
+                    
+                    // Clean up
+                    document.body.removeChild(tempElem);
+                }
+            } else {
+                // In landscape mode, optimize for width (horizontal line)
+                // Create a temporary span to measure text width
+                const tempSpan = document.createElement('span');
+                tempSpan.style.visibility = 'hidden';
+                tempSpan.style.position = 'absolute';
+                tempSpan.style.whiteSpace = 'nowrap';
+                tempSpan.style.fontFamily = window.getComputedStyle(stopwatchDisplay).fontFamily;
+                tempSpan.textContent = stopwatchDisplay.textContent; // Use the plain text content
+                document.body.appendChild(tempSpan);
+                
+                // Start with a large font size
+                let fontSize = 100;
+                tempSpan.style.fontSize = `${fontSize}px`;
+                
+                // Calculate the ratio between container size and text size
+                const widthRatio = containerWidth / tempSpan.offsetWidth;
+                const heightRatio = containerHeight / tempSpan.offsetHeight;
+                
+                // Use the smaller ratio to ensure text fits both width and height
+                const ratio = Math.min(widthRatio, heightRatio) * 0.9; // 90% of container
+                
+                // Calculate the optimal font size
+                fontSize = Math.floor(fontSize * ratio);
+                
+                // Apply to display
+                stopwatchDisplay.style.fontSize = `${fontSize}px`;
+                
+                // Clean up
+                document.body.removeChild(tempSpan);
+            }
+        }
+
+        // Check if fullscreen is supported
+        function isFullscreenSupported() {
+            return document.documentElement.requestFullscreen || 
+                   document.documentElement.mozRequestFullScreen || 
+                   document.documentElement.webkitRequestFullscreen || 
+                   document.documentElement.msRequestFullscreen;
+        }
+        
+        // Enter fullscreen mode
+        function enterFullscreen() {
+            if (!state.isFullScreen) {
+                if (isFullscreenSupported()) {
+                    if (document.documentElement.requestFullscreen) {
+                        document.documentElement.requestFullscreen();
+                    } else if (document.documentElement.mozRequestFullScreen) { /* Firefox */
+                        document.documentElement.mozRequestFullScreen();
+                    } else if (document.documentElement.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
+                        document.documentElement.webkitRequestFullscreen();
+                    } else if (document.documentElement.msRequestFullscreen) { /* IE/Edge */
+                        document.documentElement.msRequestFullscreen();
+                    }
+                    
+                    state.isFullScreen = true;
+                    body.classList.add('full-screen');
+                }
+            }
+        }
+        
+        // Exit fullscreen mode
+        function exitFullscreen() {
+            if (state.isFullScreen) {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.mozCancelFullScreen) { /* Firefox */
+                    document.mozCancelFullScreen();
+                } else if (document.webkitExitFullscreen) { /* Chrome, Safari & Opera */
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) { /* IE/Edge */
+                    document.msExitFullscreen();
+                }
+                
+                state.isFullScreen = false;
+                body.classList.remove('full-screen');
+            }
+        }
+        
+        // Track fullscreen changes
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+        document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+        
+        function handleFullscreenChange() {
+            // Update state to match actual fullscreen status
+            const isFullscreenNow = document.fullscreenElement || 
+                                  document.webkitFullscreenElement || 
+                                  document.mozFullScreenElement || 
+                                  document.msFullscreenElement;
+            
+            state.isFullScreen = !!isFullscreenNow;
+            
+            if (state.isFullScreen) {
+                body.classList.add('full-screen');
+            } else {
+                body.classList.remove('full-screen');
+            }
+        }
+
+        // Request wake lock to keep screen on
+        async function requestWakeLock() {
+            if (!state.wakeLockSupported) return;
+            
+            try {
+                state.wakeLock = await navigator.wakeLock.request('screen');
+                
+                // Reacquire wake lock if released
+                state.wakeLock.addEventListener('release', () => {
+                    if (state.running) {
+                        requestWakeLock();
+                    }
+                });
+            } catch (err) {
+                console.error(`Failed to get wake lock: ${err.name}, ${err.message}`);
+            }
+        }
+        
+        // Release wake lock
+        function releaseWakeLock() {
+            if (state.wakeLock) {
+                state.wakeLock.release()
+                    .then(() => {
+                        state.wakeLock = null;
+                    })
+                    .catch(err => {
+                        console.error(`Failed to release wake lock: ${err.name}, ${err.message}`);
+                    });
+            }
+        }
+        
+        // Play sine wave tones with sequential delay
+        function playTones(frequencies = [256, 512], duration = 200, delay = 333) {
+            if (!state.audioContext) {
+                try {
+                    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                } catch (e) {
+                    console.error("Can't create audio context:", e);
+                    return;
+                }
+            }
+            
+            try {
+                frequencies.forEach((frequency, index) => {
+                    setTimeout(() => {
+                        const oscillator = state.audioContext.createOscillator();
+                        const gainNode = state.audioContext.createGain();
+                        
+                        oscillator.type = 'sine';
+                        oscillator.frequency.value = frequency;
+                        oscillator.connect(gainNode);
+                        gainNode.connect(state.audioContext.destination);
+                        
+                        const now = state.audioContext.currentTime;
+                        gainNode.gain.setValueAtTime(0, now);
+                        gainNode.gain.linearRampToValueAtTime(0.3, now + 0.01); // Lower gain to blend tones
+                        gainNode.gain.setValueAtTime(0.3, now + duration / 1000 - 0.01);
+                        gainNode.gain.linearRampToValueAtTime(0, now + duration / 1000);
+                        
+                        oscillator.start(now);
+                        oscillator.stop(now + duration / 1000);
+                    }, index * delay);
+                });
+            } catch (e) {
+                console.error("Audio playback error:", e);
+            }
+        }
+        
+        // Animate font size - increase by 10% and then return to original
+        function animateFontSize() {
+            // Clear any existing animation timeout
+            if (state.animationTimeout) {
+                clearTimeout(state.animationTimeout);
+            }
+            
+            // Apply scale transform
+            stopwatchDisplay.style.transform = 'scale(1.1)';
+            
+            // Set timeout to revert back to original size
+            state.animationTimeout = setTimeout(() => {
+                stopwatchDisplay.style.transform = 'scale(1.0)';
+            }, 300);
+        }
+        
+        // Set tap interaction color (all white) and animate
+        function setTapColor() {
+            // Clear any existing timeout
+            if (state.tapTimeout) {
+                clearTimeout(state.tapTimeout);
+            }
+            
+            // Set all digits to white for tap interactions
+            const digits = stopwatchDisplay.querySelectorAll('.digit');
+            digits.forEach(digit => {
+                digit.classList.remove('yellow');
+                digit.classList.add('white');
+            });
+            
+            // Animate font size
+            animateFontSize();
+            
+            // Set timeout to revert color after 500ms
+            state.tapTimeout = setTimeout(() => {
+                updateDisplay(); // Restore proper color scheme
+            }, 500);
+        }
+        
+        // Start the stopwatch
+        function startStopwatch() {
+            if (!state.running) {
+                // Show white color for tap interaction and animate
+                setTapColor();
+                
+                // Play two sine tones when the stopwatch starts (low to high)
+                playTones([256, 512], 200, 333);
+                
+                // Enter fullscreen mode
+                enterFullscreen();
+                
+                // Request wake lock
+                requestWakeLock();
+                
+                state.startTime = Date.now();
+                state.running = true;
+                state.timerInterval = setInterval(updateDisplay, 1000);
+            }
+        }
+        
+        // Pause the stopwatch
+        function pauseStopwatch() {
+            if (state.running) {
+                // Show white color for tap interaction and animate
+                setTapColor();
+                
+                clearInterval(state.timerInterval);
+                state.elapsedTime += Date.now() - state.startTime;
+                state.running = false;
+                
+                // Exit fullscreen mode
+                exitFullscreen();
+                
+                // Release wake lock
+                releaseWakeLock();
+            }
+        }
+        
+        // Reset the stopwatch
+        function resetStopwatch() {
+            // Show white color for tap interaction and animate
+            setTapColor();
+            
+            // Play tones in order (high to low) for reset
+            playTones([512, 256], 200, 333);
+            
+            clearInterval(state.timerInterval);
+            state.running = false;
+            state.startTime = 0;
+            state.elapsedTime = 0;
+            state.lastTimeString = '0';
+            state.lastTimeType = 'seconds';
+            updateDisplay();
+            
+            // Exit fullscreen if we're in it
+            exitFullscreen();
+            
+            // Release wake lock
+            releaseWakeLock();
+        }
+        
+        // Handle stopwatch taps (start -> pause -> reset)
+        function handleStopwatchTap() {
+            state.tapCount = (state.tapCount + 1) % 3;
+            
+            switch(state.tapCount) {
+                case 0:
+                    resetStopwatch();
+                    break;
+                case 1:
+                    startStopwatch();
+                    break;
+                case 2:
+                    pauseStopwatch();
+                    break;
+            }
+        }
+        
+        // Set touch interaction state (white color for movement)
+        function setTouchInteractionState(isInteracting) {
+            // Don't interrupt tap color changes
+            if (state.tapTimeout) return;
+            
+            // Clear any existing timeout
+            if (state.interactionTimeout) {
+                clearTimeout(state.interactionTimeout);
+            }
+            
+            // Set the interaction state
+            state.isInteracting = isInteracting;
+            
+            // Change color based on interaction state
+            if (isInteracting) {
+                const digits = stopwatchDisplay.querySelectorAll('.digit');
+                digits.forEach(digit => {
+                    digit.classList.remove('yellow');
+                    digit.classList.add('white');
+                });
+                
+                // Set timeout to revert color after 500ms of no interaction
+                state.interactionTimeout = setTimeout(() => {
+                    updateDisplay(); // Restore proper color scheme
+                    state.isInteracting = false;
+                }, 500);
+            } else {
+                updateDisplay(); // Restore proper color scheme
+            }
+        }
+        
+        // Vertical movement handlers
+        function handleTouchStart(e) {
+            if (e.touches && e.touches.length === 1) {
+                setTouchInteractionState(true); // Set interaction state to true (white color)
+                
+                state.isDragging = true;
+                state.startY = e.touches[0].clientY;
+                state.lastPosY = e.touches[0].clientY;
+            }
+        }
+        
+        function handleTouchMove(e) {
+            if (!state.isDragging) return;
+            
+            if (e.touches && e.touches.length === 1) {
+                e.preventDefault();
+                
+                setTouchInteractionState(true); // Keep interaction state true (white color)
+                
+                const deltaY = e.touches[0].clientY - state.lastPosY;
+                
+                // Get current transform
+                const transformValue = window.getComputedStyle(stopwatchDisplay).transform;
+                const matrix = new DOMMatrix(transformValue === 'none' ? 'matrix(1, 0, 0, 1, 0, 0)' : transformValue);
+                
+                // Apply new translation - only vertical movement
+                stopwatchDisplay.style.transform = `translate(0, ${matrix.f + deltaY}px)`;
+                
+                // Update last position
+                state.lastPosY = e.touches[0].clientY;
+            }
+        }
+        
+        function handleTouchEnd() {
+            state.isDragging = false;
+            // Let the interaction timeout handle returning to proper color scheme
+        }
+        
+        // Initialize audio context on user interaction (required by browsers)
+        function initAudio() {
+            if (!state.audioContext) {
+                try {
+                    state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    // Create and play a silent buffer to unlock the audio context
+                    const buffer = state.audioContext.createBuffer(1, 1, 22050);
+                    const source = state.audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(state.audioContext.destination);
+                    source.start(0);
+                } catch (e) {
+                    console.error("Failed to initialize audio:", e);
+                }
+            }
+        }
+        
+        // Handle escape key in fullscreen mode
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && state.isFullScreen && state.running) {
+                pauseStopwatch();
+            }
+        });
+        
+        // Event listeners
+        stopwatchDisplay.addEventListener('click', function(e) {
+            initAudio(); // Initialize audio on first interaction
+            handleStopwatchTap();
+        });
+        
+        // Handle touch events for vertical movement only
+        stopwatchDisplay.addEventListener('touchstart', (e) => {
+            initAudio(); // Initialize audio on first interaction
+            handleTouchStart(e);
+        }, false);
+        
+        stopwatchDisplay.addEventListener('touchmove', (e) => {
+            handleTouchMove(e);
+        }, { passive: false });
+        
+        stopwatchDisplay.addEventListener('touchend', handleTouchEnd);
+        
+        // Document visibility
+        document.addEventListener('visibilitychange', () => {
+            if (state.wakeLockSupported && document.visibilityState === 'visible' && state.running) {
+                requestWakeLock();
+            }
+        });
+        
+        // Screen orientation change detection
+        window.addEventListener('orientationchange', () => {
+            // Wait for the orientation change to complete
+            setTimeout(() => {
+                checkOrientation();
+                updateDisplay(); // Force redraw with new orientation
+            }, 300);
+        });
+        
+        // Fallback for devices that don't support orientationchange
+        window.addEventListener('resize', () => {
+            checkOrientation();
+        });
+        
+        // Initialize display
+        checkOrientation();
+        updateDisplay();
+    </script>
+</body>
+</html>
