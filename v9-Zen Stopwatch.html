@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Minimalist Stopwatch</title>
+    <style>
+        :root {
+            --text-color-orange: #ff9d33; /* Brightened orange by 30% from #ff8c00 */
+            --text-color-white: #ffffff; /* White */
+            --tap-color: #ffffff; /* White for tap interactions */
+            --touch-color: rgba(255, 255, 255, 0.8); /* 80% white for touch movement */
+            --bg-color: #000;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Courier New', monospace;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            touch-action: manipulation;
+        }
+        
+        body.full-screen {
+            padding: 0;
+        }
+        
+        #clock-container {
+            position: absolute;
+            top: 5%;
+            left: 0;
+            width: 100%;
+            height: 5vh; /* Add fixed height for click target */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            cursor: pointer;
+        }
+        
+        #clock-display {
+            text-align: center;
+            user-select: none;
+            font-size: 30px; /* Will be dynamically set */
+            opacity: 1;
+            transition: opacity 0.3s ease;
+        }
+        
+        #clock-display.hidden {
+            opacity: 0;
+        }
+        
+        #clock-hours {
+            color: var(--text-color-white);
+        }
+        
+        #clock-minutes {
+            color: var(--text-color-orange);
+        }
+        
+        #stopwatch-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        #stopwatch-display {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            user-select: none;
+            cursor: pointer;
+            transition: color 0.3s ease, transform 0.3s ease;
+        }
+        
+        #stopwatch-display.portrait {
+            flex-direction: column; /* Vertical stacking in portrait mode */
+        }
+        
+        #stopwatch-display.landscape {
+            flex-direction: row; /* Horizontal layout in landscape mode */
+        }
+        
+        /* Digit group styling */
+        .digit-group {
+            display: inline-flex;
+            flex-direction: row;
+        }
+        
+        /* Character-specific styling */
+        .digit {
+            display: inline-block;
+            transition: color 0.3s ease;
+        }
+        
+        .digit.orange {
+            color: var(--text-color-orange);
+        }
+        
+        .digit.white {
+            color: var(--text-color-white);
+        }
+        
+        /* Hidden elements for screen wake */
+        .wakelock-element {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0.01;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="clock-container">
+        <div id="clock-display">
+            <span id="clock-hours">00</span><span id="clock-minutes">00</span>
+        </div>
+    </div>
+    
+    <div id="stopwatch-container">
+        <div id="stopwatch-display" class="portrait">0</div>
+    </div>
+    
+    <!-- Hidden elements for keeping the screen awake -->
+    <audio id="wakelock-audio" loop style="display:none"></audio>
+    <video id="wakelock-video" loop muted playsinline class="wakelock-element"></video>
+    <canvas id="wakelock-canvas" class="wakelock-element"></canvas>
+
+    <script>
+        // DOM Elements
+        const stopwatchDisplay = document.getElementById('stopwatch-display');
+        const clockDisplay = document.getElementById('clock-display');
+        const clockHours = document.getElementById('clock-hours');
+        const clockMinutes = document.getElementById('clock-minutes');
+        const clockContainer = document.getElementById('clock-container');
+        const container = document.getElementById('stopwatch-container');
+        const body = document.body;
+        const wakelockAudio = document.getElementById('wakelock-audio');
+        const wakelockVideo = document.getElementById('wakelock-video');
+        const wakelockCanvas = document.getElementById('wakelock-canvas');
+        
+        // Stopwatch state
+        const state = {
+            running: false,
+            startTime: 0,
+            elapsedTime: 0,
+            timerInterval: null,
+            clockInterval: null,
+            tapCount: 0,
+            // Track double click
+            lastClickTime: 0,
+            // Touch state
+            startY: 0,
+            lastPosY: 0,
+            isDragging: false,
+            isInteracting: false,
+            interactionTimeout: null,
+            tapTimeout: null,
+            animationTimeout: null,
+            // Audio context
+            audioContext: null,
+            // Fullscreen state
+            isFullScreen: false,
+            wakeLock: null,
+            wakeLockSupported: 'wakeLock' in navigator,
+            // Font animation
+            initialFontSize: '',
+            // Orientation
+            isPortrait: window.innerHeight > window.innerWidth,
+            // Last time display
+            lastTimeString: '0',
+            lastTimeType: 'seconds',
+            // Screen wake methods
+            wakeupIntervalId: null,
+            lastKeyPressTime: Date.now(),
+            // Stopwatch font size
+            currentFontSize: 100,
+            lastSecond: -1,
+            // Clock display state
+            clockVisible: true
+        };
+        
+        // Try to initialize audio context
+        try {
+            state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+            console.error("Web Audio API not supported:", e);
+        }
+        
+        // Format time for display (with padding zeros)
+        function formatTime(timeInSeconds) {
+            const hours = Math.floor(timeInSeconds / 3600);
+            const minutes = Math.floor((timeInSeconds % 3600) / 60);
+            const seconds = timeInSeconds % 60;
+            
+            // Determine display format based on elapsed time
+            let timeString;
+            let timeType;
+            
+            if (hours > 0) {
+                // Format with padding zeros
+                timeString = `${hours.toString().padStart(2, '0')}${minutes.toString().padStart(2, '0')}${seconds.toString().padStart(2, '0')}`;
+                timeType = 'hours';
+            } else if (minutes > 0) {
+                // Format with padding zeros
+                timeString = `${minutes.toString().padStart(2, '0')}${seconds.toString().padStart(2, '0')}`;
+                timeType = 'minutes';
+            } else {
+                // Just seconds with padding zeros for values under 10
+                timeString = `${seconds.toString().padStart(2, '0')}`;
+                timeType = 'seconds';
+            }
+            
+            return { timeString, timeType };
+        }
+        
+        // Update real time clock - show only hours (white) and minutes (orange) without colon
+        function updateClock() {
+            const now = new Date();
+            const hours = now.getHours().toString().padStart(2, '0');
+            const minutes = now.getMinutes().toString().padStart(2, '0');
+            const seconds = now.getSeconds().toString().padStart(2, '0');
+            
+            // Update the clock display
+            clockHours.textContent = hours;
+            clockMinutes.textContent = minutes;
+            
+            // Update font size based on stopwatch if the second has changed
+            if (state.lastSecond !== seconds) {
+                state.lastSecond = seconds;
+                
+                // Set clock font size to 30% of the stopwatch font size
+                if (state.currentFontSize > 0) {
+                    clockHours.style.fontSize = `${state.currentFontSize * 0.3}px`;
+                    clockMinutes.style.fontSize = `${state.currentFontSize * 0.3}px`;
+                }
+            }
+        }
+        
+        // Toggle clock visibility
+        function toggleClockVisibility(e) {
+            // Prevent event from propagating to stopwatch
+            e.stopPropagation();
+            
+            // Toggle clock display visibility
+            state.clockVisible = !state.clockVisible;
+            
+            if (state.clockVisible) {
+                clockDisplay.classList.remove('hidden');
+            } else {
+                clockDisplay.classList.add('hidden');
+            }
+        }
+        
+        // Update stopwatch display with colored digits
+        function updateDisplay() {
+            const currentTime = state.running ? 
+                Math.floor((Date.now() - state.startTime + state.elapsedTime) / 1000) : 
+                Math.floor(state.elapsedTime / 1000);
+            
+            const { timeString, timeType } = formatTime(currentTime);
+            
+            // Store current time info
+            const isNewTimeType = timeType !== state.lastTimeType;
+            state.lastTimeString = timeString;
+            state.lastTimeType = timeType;
+            
+            // Check orientation
+            checkOrientation();
+            
+            // Create HTML for display with colored spans
+            let displayHTML = '';
+            
+            if (state.isPortrait) {
+                // Portrait mode - digits stacked vertically
+                if (timeType === 'seconds') {
+                    // Just seconds - all orange
+                    // Group digits in pairs
+                    for (let i = 0; i < timeString.length; i += 2) {
+                        displayHTML += `<div class="digit-group">`;
+                        displayHTML += `<span class="digit orange">${timeString[i]}</span>`;
+                        if (i + 1 < timeString.length) {
+                            displayHTML += `<span class="digit orange">${timeString[i + 1]}</span>`;
+                        }
+                        displayHTML += `</div>`;
+                    }
+                } else if (timeType === 'minutes') {
+                    // Minutes and seconds: minutes white, seconds orange
+                    const minutesPart = timeString.slice(0, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Group minutes digits in pairs - white
+                    for (let i = 0; i < minutesPart.length; i += 2) {
+                        displayHTML += `<div class="digit-group">`;
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                        if (i + 1 < minutesPart.length) {
+                            displayHTML += `<span class="digit white">${minutesPart[i + 1]}</span>`;
+                        }
+                        displayHTML += `</div>`;
+                    }
+                    
+                    // Group seconds digits in pairs - orange
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit orange">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'hours') {
+                    // Hours, minutes and seconds: hours white, minutes white, seconds orange
+                    const hoursPart = timeString.slice(0, -4);
+                    const minutesPart = timeString.slice(-4, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Group hour digits - white
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < hoursPart.length; i++) {
+                        displayHTML += `<span class="digit white">${hoursPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                    
+                    // Group minute digits - white
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                    
+                    // Group seconds digits - orange
+                    displayHTML += `<div class="digit-group">`;
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit orange">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                }
+            } else {
+                // Landscape mode - single line display
+                if (timeType === 'seconds') {
+                    // Just seconds - all orange
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < timeString.length; i++) {
+                        displayHTML += `<span class="digit orange">${timeString[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'minutes') {
+                    // Minutes white, seconds orange
+                    const minutesPart = timeString.slice(0, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Minutes part - white
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                    }
+                    
+                    // Seconds part - orange
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit orange">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                } else if (timeType === 'hours') {
+                    // Hours white, minutes white, seconds orange
+                    const hoursPart = timeString.slice(0, -4);
+                    const minutesPart = timeString.slice(-4, -2);
+                    const secondsPart = timeString.slice(-2);
+                    
+                    // Hours part - white
+                    displayHTML = `<div class="digit-group">`;
+                    for (let i = 0; i < hoursPart.length; i++) {
+                        displayHTML += `<span class="digit white">${hoursPart[i]}</span>`;
+                    }
+                    
+                    // Minutes part - white
+                    for (let i = 0; i < minutesPart.length; i++) {
+                        displayHTML += `<span class="digit white">${minutesPart[i]}</span>`;
+                    }
+                    
+                    // Seconds part - orange
+                    for (let i = 0; i < secondsPart.length; i++) {
+                        displayHTML += `<span class="digit orange">${secondsPart[i]}</span>`;
+                    }
+                    displayHTML += `</div>`;
+                }
+            }
+            
+            stopwatchDisplay.innerHTML = displayHTML;
+            adjustFontSize();
+        }
+        
+        // Check for orientation changes
+        function checkOrientation() {
+            const wasPortrait = state.isPortrait;
+            state.isPortrait = window.innerHeight > window.innerWidth;
+            
+            if (wasPortrait !== state.isPortrait) {
+                // Update display class
+                if (state.isPortrait) {
+                    stopwatchDisplay.classList.remove('landscape');
+                    stopwatchDisplay.classList.add('portrait');
+                } else {
+                    stopwatchDisplay.classList.remove('portrait');
+                    stopwatchDisplay.classList.add('landscape');
+                }
+                
+                // Wait a bit for the browser to finish resizing
+                setTimeout(adjustFontSize, 300);
+            }
+        }
+        
+        // Adjust font size to fit screen edge to edge
+        function adjustFontSize() {
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            
+            if (state.isPortrait) {
+                // In portrait mode, optimize for stacked digits
+                const digitGroups = document.querySelectorAll('.digit-group');
+                const numGroups = digitGroups.length;
+                
+                if (numGroups > 0) {
+                    // Calculate available height per group
+                    const availableHeight = containerHeight * 0.9; // 90% of container height
+                    const heightPerGroup = availableHeight / numGroups;
+                    
+                    // Find the widest group
+                    let maxWidth = 0;
+                    let maxTextLength = 0;
+                    
+                    digitGroups.forEach(group => {
+                        const textLength = group.textContent.length;
+                        if (textLength > maxTextLength) {
+                            maxTextLength = textLength;
+                            maxWidth = group.textContent.length * 20; // Rough estimate
+                        }
+                    });
+                    
+                    // Create a temporary element to measure
+                    const tempElem = document.createElement('div');
+                    tempElem.style.visibility = 'hidden';
+                    tempElem.style.position = 'absolute';
+                    tempElem.style.whiteSpace = 'nowrap';
+                    tempElem.style.fontFamily = window.getComputedStyle(stopwatchDisplay).fontFamily;
+                    tempElem.textContent = 'X'.repeat(maxTextLength);
+                    document.body.appendChild(tempElem);
+                    
+                    // Calculate optimal font size based on width and height constraints
+                    let fontSize = 100;
+                    tempElem.style.fontSize = `${fontSize}px`;
+                    
+                    // Width constraint
+                    const widthRatio = containerWidth / tempElem.offsetWidth;
+                    // Height constraint (each group should fit in its allocated height)
+                    temp
